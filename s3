@@ -1,0 +1,14 @@
+Resources:
+  MyBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: your-bucket-name
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: path/to/your/directory/
+            Function: !GetAtt UpdateCloudFrontLambda.Arn
