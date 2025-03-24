@@ -1,65 +1,103 @@
-name: Create Sub Issues and Link to Parent
+name: Create Sub-Issues
 
 on:
-  workflow_dispatch:
-    inputs:
-      parent_issue_number:
-        description: '親Issueの番号'
-        required: true
-        type: number
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+  contents: read
 
 jobs:
-  create_sub_issues:
+  create-subissues:
+    if: github.event.comment.body == '/create-subissues'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (必要に応じて)
+      - name: Checkout
         uses: actions/checkout@v3
 
-      - name: Create sub-issues and link
-        uses: actions/github-script@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          github-token: ${{ secrets.GH_TOKEN }}
-          script: |
-            const parentNumber = inputs.parent_issue_number;
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
+          node-version: '20'
 
-            // 親Issueを取得
-            const parent = await github.rest.issues.get({
+      - name: Create script directory
+        run: mkdir -p .github/scripts
+
+      - name: Write sub-issue script
+        run: |
+          cat << 'EOF' > .github/scripts/create-subissues.js
+          const { Octokit } = require("@octokit/core");
+
+          const token = process.env.GH_TOKEN;
+          const issueNumber = process.env.ISSUE_NUMBER;
+          const repoFull = process.env.ISSUE_REPO;
+
+          const [owner, repo] = repoFull.split("/");
+
+          const octokit = new Octokit({ auth: token });
+
+          async function run() {
+            const { data: issue } = await octokit.request("GET /repos/{owner}/{repo}/issues/{issue_number}", {
               owner,
               repo,
-              issue_number: parentNumber,
+              issue_number: issueNumber
             });
 
-            const parentBody = parent.data.body;
-            const parentNodeId = parent.data.node_id;
+            const lines = issue.body.split("\n");
 
-            // チェックリスト項目を抽出
-            const checklistItems = parentBody.match(/- \[ \] (.+)/g) || [];
+            let currentRepo = repo;
+            const subIssues = [];
 
-            for (const item of checklistItems) {
-              const title = item.replace(/- \[ \] /, '').trim();
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (trimmed.startsWith("## ")) {
+                currentRepo = trimmed.replace("## ", "").trim();
+              } else if (trimmed.startsWith("- [ ] ")) {
+                const title = trimmed.replace("- [ ] ", "").trim();
+                subIssues.push({ repo: currentRepo, title });
+              }
+            }
 
-              // 子Issueを作成
-              const child = await github.rest.issues.create({
-                owner,
-                repo,
-                title: title,
-                body: `This issue is part of #${parentNumber}`,
+            for (const sub of subIssues) {
+              const [subOwner, subRepo] = sub.repo.includes("/") ? sub.repo.split("/") : [owner, sub.repo];
+              const { data: newIssue } = await octokit.request("POST /repos/{owner}/{repo}/issues", {
+                owner: subOwner,
+                repo: subRepo,
+                title: sub.title,
+                body: `Created from parent issue: #${issueNumber}`
               });
 
-              const childNodeId = child.data.node_id;
+              await octokit.request("POST /repos/{owner}/{repo}/issues/{issue_number}/timeline", {
+                owner,
+                repo,
+                issue_number: issueNumber,
+                event: "connected",
+                subject_type: "issue",
+                subject_id: newIssue.node_id
+              }).catch(() => {}); // Skip if not supported
 
-              // GraphQLで親子リンク（Tracks）を追加
-              await github.graphql(`
-                mutation {
-                  addLinkedIssue(input: {
-                    subjectId: "${parentNodeId}",
-                    linkedIssueId: "${childNodeId}",
-                    relationshipType: TRACKS
-                  }) {
-                    clientMutationId
-                  }
-                }
-              `);
+              await octokit.request("POST /repos/{owner}/{repo}/issues/{issue_number}/comments", {
+                owner,
+                repo,
+                issue_number: issueNumber,
+                body: `- [ ] [${sub.title}](https://github.com/${subOwner}/${subRepo}/issues/${newIssue.number})`
+              });
             }
+          }
+
+          run().catch(err => {
+            console.error(err);
+            process.exit(1);
+          });
+          EOF
+
+      - name: Install dependencies
+        run: npm install @octokit/core
+
+      - name: Run sub-issue creator
+        run: node .github/scripts/create-subissues.js
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_REPO: ${{ github.repository }}
