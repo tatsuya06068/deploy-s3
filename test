@@ -1,54 +1,65 @@
-name: Create Sub-Issues by Repository
+name: Create Sub Issues and Link to Parent
 
 on:
-  issue_comment:
-    types: [created]
+  workflow_dispatch:
+    inputs:
+      parent_issue_number:
+        description: '親Issueの番号'
+        required: true
+        type: number
 
 jobs:
   create_sub_issues:
-    if: github.event.comment.body == '/create-subissues'
     runs-on: ubuntu-latest
     steps:
-      - name: Create sub-issues
-        uses: actions/github-script@v6
+      - name: Checkout (必要に応じて)
+        uses: actions/checkout@v3
+
+      - name: Create sub-issues and link
+        uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          github-token: ${{ secrets.GH_TOKEN }}
           script: |
-            const parentIssue = context.payload.issue;
-            const body = parentIssue.body || '';
+            const parentNumber = inputs.parent_issue_number;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
 
-            const lines = body.split('\n');
-            let currentRepo = null;
-            let repoChecklistMap = {};
+            // 親Issueを取得
+            const parent = await github.rest.issues.get({
+              owner,
+              repo,
+              issue_number: parentNumber,
+            });
 
-            for (const line of lines) {
-              const repoMatch = line.match(/^- \[ \] ([\w-]+\/[\w-]+)/);
-              if (repoMatch) {
-                currentRepo = repoMatch[1];
-                repoChecklistMap[currentRepo] = [];
-              } else {
-                const childMatch = line.match(/^\s*- \[ \] (.+)/);
-                if (childMatch && currentRepo) {
-                  repoChecklistMap[currentRepo].push(childMatch[1].trim());
+            const parentBody = parent.data.body;
+            const parentNodeId = parent.data.node_id;
+
+            // チェックリスト項目を抽出
+            const checklistItems = parentBody.match(/- \[ \] (.+)/g) || [];
+
+            for (const item of checklistItems) {
+              const title = item.replace(/- \[ \] /, '').trim();
+
+              // 子Issueを作成
+              const child = await github.rest.issues.create({
+                owner,
+                repo,
+                title: title,
+                body: `This issue is part of #${parentNumber}`,
+              });
+
+              const childNodeId = child.data.node_id;
+
+              // GraphQLで親子リンク（Tracks）を追加
+              await github.graphql(`
+                mutation {
+                  addLinkedIssue(input: {
+                    subjectId: "${parentNodeId}",
+                    linkedIssueId: "${childNodeId}",
+                    relationshipType: TRACKS
+                  }) {
+                    clientMutationId
+                  }
                 }
-              }
-            }
-
-            for (const [repoFull, items] of Object.entries(repoChecklistMap)) {
-              const [owner, repo] = repoFull.split('/');
-              for (const title of items) {
-                const childIssue = await github.rest.issues.create({
-                  owner,
-                  repo,
-                  title,
-                  body: `Created from parent issue: [#${parentIssue.number}](${parentIssue.html_url})`
-                });
-
-                await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: parentIssue.number,
-                  body: `✅ Created issue in \`${repoFull}\`: [#${childIssue.data.number}](${childIssue.data.html_url}) - ${title}`
-                });
-              }
+              `);
             }
