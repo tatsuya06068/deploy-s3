@@ -1,0 +1,34 @@
+name: Create child issues from checklist
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  create_issues:
+    if: github.event.comment.body == '/create-child-issues'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract checklist and create issues
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const checklistRegex = /- \[ \] (.+)/g;
+            const parentIssue = context.payload.issue;
+            const body = parentIssue.body;
+
+            const matches = [...body.matchAll(checklistRegex)];
+            for (const match of matches) {
+              const title = match[1];
+              const child = await github.rest.issues.create({
+                ...context.repo,
+                title,
+                body: `Created from parent issue #${parentIssue.number}`
+              });
+
+              await github.rest.issues.createComment({
+                ...context.repo,
+                issue_number: parentIssue.number,
+                body: `✅ Created child issue: #${child.data.number} (${title})`
+              });
+            }
